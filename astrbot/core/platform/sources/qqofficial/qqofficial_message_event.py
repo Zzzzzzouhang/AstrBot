@@ -228,6 +228,33 @@ class QQOfficialMessageEvent(AstrMessageEvent):
         message_chains = self._split_message_chain_by_media(self.send_buffer)
         stream_for_chain = stream if len(message_chains) == 1 else None
 
+        # QQ group msg_type=7 does NOT parse <@!id> in content.
+        # Must split At+text from media: text as msg_type=0, media as msg_type=7.
+        split_chains: list[MessageChain] = []
+        for chain in message_chains:
+            has_at = any(isinstance(c, At) for c in chain.chain)
+            has_media = any(
+                isinstance(c, (Image, Record, Video, File)) for c in chain.chain
+            )
+            if has_at and has_media:
+                text_comps = [
+                    c
+                    for c in chain.chain
+                    if not isinstance(c, (Image, Record, Video, File))
+                ]
+                media_comps = [
+                    c
+                    for c in chain.chain
+                    if isinstance(c, (Image, Record, Video, File))
+                ]
+                if text_comps:
+                    split_chains.append(chain.derive(text_comps))
+                if media_comps:
+                    split_chains.append(chain.derive(media_comps))
+            else:
+                split_chains.append(chain)
+        message_chains = split_chains
+
         ret = None
         for message_chain in message_chains:
             ret = await self._post_send_one(message_chain, stream_for_chain)
@@ -366,10 +393,16 @@ class QQOfficialMessageEvent(AstrMessageEvent):
                         payload["msg_type"] = 7
                         payload.pop("markdown", None)
                         payload["content"] = plain_text or None
+                # Bypass botpy's post_group_message which uses locals()
+                # and pollutes the JSON body with nulls, breaking <@!id>.
+                route = Route(
+                    "POST",
+                    "/v2/groups/{group_openid}/messages",
+                    group_openid=source.group_openid,
+                )
                 ret = await self._send_with_markdown_fallback(
-                    send_func=lambda retry_payload: self.bot.api.post_group_message(
-                        group_openid=source.group_openid,  # type: ignore
-                        **retry_payload,
+                    send_func=lambda rp: self.bot.api._http.request(  # type: ignore[attr-defined]
+                        route, json={k: v for k, v in rp.items() if v is not None}
                     ),
                     payload=payload,
                     plain_text=plain_text,
@@ -750,7 +783,8 @@ class QQOfficialMessageEvent(AstrMessageEvent):
             elif isinstance(i, At):
                 qq_id = getattr(i, "qq", "")
                 if qq_id and qq_id != "all":
-                    plain_text += f"<@{qq_id}>"
+                    # QQ Official uses <@!id> for outgoing mentions.
+                    plain_text += f"<@!{qq_id}>"
             else:
                 logger.debug(f"qq_official 忽略 {i.type}")
         return (

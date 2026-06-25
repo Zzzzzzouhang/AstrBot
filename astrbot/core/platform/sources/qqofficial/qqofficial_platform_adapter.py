@@ -14,6 +14,7 @@ import botpy.message
 from botpy import Client
 from botpy.connection import ConnectionState
 from botpy.gateway import BotWebSocket
+from botpy.http import Route
 
 from astrbot import logger
 from astrbot.api.event import MessageChain
@@ -340,10 +341,15 @@ class QQOfficialPlatformAdapter(Platform):
                         payload["media"] = media
                         payload["msg_type"] = 7
                         payload.pop("msg_id", None)
-                ret = await self.client.api.post_group_message(
+                # Bypass botpy's post_group_message which uses locals()
+                # and pollutes the JSON body with nulls, breaking <@!id>.
+                route = Route(
+                    "POST",
+                    "/v2/groups/{group_openid}/messages",
                     group_openid=session.session_id,
-                    **payload,
                 )
+                clean = {k: v for k, v in payload.items() if v is not None}
+                ret = await self.client.api._http.request(route, json=clean)
             else:
                 if image_path:
                     payload["file_image"] = image_path
